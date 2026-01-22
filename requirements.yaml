@@ -1,0 +1,87 @@
+# ILM Evaluation Framework - Requirements by Python Version
+# Install with: pip install -r <(python -c "import yaml; import sys; d=yaml.safe_load(open('requirements.yaml')); v=f'{sys.version_info.major}.{sys.version_info.minor}'; print('\n'.join(d['python_versions'].get(v,d['python_versions']['3.9'])['pip']))")
+
+default_python: "3.9"
+
+python_versions:
+  "3.9":
+    python: ">=3.9,<3.10"
+    tested: true
+    notes: "Primary development version"
+    pip:
+      - torch>=2.0.0,<3.0.0
+      - transformers>=4.40.0
+      - nltk>=3.8.0
+      - numpy>=1.24.0,<3.0.0
+      - huggingface-hub>=0.20.0
+      - safetensors>=0.4.0
+      - tokenizers>=0.15.0
+      - sentencepiece>=0.1.99  # optional, for some T5 models
+    tested_with:
+      torch: "2.8.0"
+      transformers: "4.57.6"
+      nltk: "3.9.2"
+      numpy: "2.0.2"
+      huggingface-hub: "0.36.0"
+      safetensors: "0.7.0"
+      tokenizers: "0.22.2"
+
+  "3.10":
+    python: ">=3.10,<3.11"
+    tested: false
+    notes: "Should work, not explicitly tested"
+    pip:
+      - torch>=2.0.0,<3.0.0
+      - transformers>=4.40.0
+      - nltk>=3.8.0
+      - numpy>=1.24.0,<3.0.0
+      - huggingface-hub>=0.20.0
+      - safetensors>=0.4.0
+      - tokenizers>=0.15.0
+      - sentencepiece>=0.1.99
+
+  "3.11":
+    python: ">=3.11,<3.12"
+    tested: false
+    notes: "Should work, not explicitly tested"
+    pip:
+      - torch>=2.1.0,<3.0.0
+      - transformers>=4.40.0
+      - nltk>=3.8.0
+      - numpy>=1.24.0,<3.0.0
+      - huggingface-hub>=0.20.0
+      - safetensors>=0.4.0
+      - tokenizers>=0.15.0
+      - sentencepiece>=0.1.99
+
+  "3.12":
+    python: ">=3.12,<3.13"
+    tested: false
+    notes: "Experimental - some packages may have issues"
+    pip:
+      - torch>=2.2.0,<3.0.0
+      - transformers>=4.40.0
+      - nltk>=3.8.0
+      - numpy>=1.26.0,<3.0.0
+      - huggingface-hub>=0.20.0
+      - safetensors>=0.4.0
+      - tokenizers>=0.15.0
+      - sentencepiece>=0.1.99
+
+# Optional dependencies by feature
+optional:
+  ilm_models:
+    description: "Required for ILM model inference"
+    pip:
+      - ilm  # github.com/chrisdonahue/ilm
+    notes: "Install from source: pip install git+https://github.com/chrisdonahue/ilm.git"
+
+  cuda:
+    description: "GPU acceleration"
+    notes: "Install torch with CUDA support: pip install torch --index-url https://download.pytorch.org/whl/cu121"
+
+# Quick install commands
+install_commands:
+  basic: "pip install torch transformers nltk numpy huggingface-hub"
+  full: "pip install torch transformers nltk numpy huggingface-hub safetensors tokenizers sentencepiece"
+  cuda: "pip install torch --index-url https://download.pytorch.org/whl/cu121 && pip install transformers nltk numpy huggingface-hub"
