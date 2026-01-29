@@ -1,7 +1,121 @@
 # -*- coding: utf-8 -*-
 """Interactive ILM Inference Script
 
-Iterates over texts from a CSV file, randomly masks tokens, and shows predictions.
+This script provides an interactive interface for evaluating Infill Language Models (ILMs).
+It loads texts from a CSV file, randomly masks selected words, and generates predictions
+using a trained ILM model.
+
+## Overview
+
+An Infill Language Model is a language model trained to fill in missing portions of text
+given surrounding context. This script allows you to:
+
+1. Load texts from a CSV file
+2. Randomly mask words in the text
+3. Generate multiple prediction candidates
+4. View predictions with highlighted infills
+5. Navigate through texts interactively
+
+## Features
+
+- **Interactive Navigation**: Move between texts, re-mask current text, or jump to specific indices
+- **Flexible Masking**: Mask random words with configurable count
+- **Multiple Predictions**: Generate multiple candidate infills for comparison
+- **Color Highlighting**: Green highlighting for infilled portions in output
+- **Markdown Output**: Optional markdown table format for predictions
+- **Reproducibility**: Seed support for deterministic masking
+- **Text Truncation**: Automatic truncation to prevent overly long texts
+
+## CSV Input Format
+
+The input CSV file should have the following columns:
+- `id`: Unique identifier for the text
+- `text`: The text content to process (required)
+- `cefr_label`: Optional CEFR proficiency level (A1-C2)
+- `l1`: Optional first language of author
+
+Example CSV:
+```
+id,text,cefr_label,l1
+001,"The quick brown fox jumps over the lazy dog.",B1,Spanish
+002,"Machine learning is a subset of artificial intelligence.",B2,French
+```
+
+## Usage Examples
+
+### Basic Usage
+```bash
+python ilm_interactive.py -i texts.csv --model-dir ../models/sto_ilm
+```
+
+### Advanced Options
+```bash
+# Generate 5 predictions per masked text, mask 4 words
+python ilm_interactive.py -i texts.csv --n-masks 4 --num-infills 5
+
+# Start from text 10, shuffle order, set random seed for reproducibility
+python ilm_interactive.py -i texts.csv --start-idx 9 --shuffle --seed 42
+
+# Output predictions as markdown table, limit text to 300 characters
+python ilm_interactive.py -i texts.csv --markdown --max-chars 300
+```
+
+## Interactive Commands
+
+While running, use these commands:
+- `[Enter]`: Move to next text
+- `r`: Re-mask the current text (generate new random masks)
+- `q`: Quit the script
+- `[number]`: Jump to text at index (1-indexed)
+
+## How It Works
+
+1. **Model Loading**: Loads a pre-trained GPT-2 based ILM with custom tokens
+2. **Tokenization**: Uses GPT-2 tokenizer with additional special tokens for infill markers
+3. **Masking**: Randomly selects words and replaces them with `_` marker
+4. **Infilling**: Generates predictions using the ILM's bidirectional infill capability
+5. **Colorization**: Highlights newly generated text in green
+6. **Display**: Shows original, masked, and predicted versions
+
+## Output Format
+
+### Default Format
+Shows full text with infilled portions highlighted in green:
+```
+--- Option 1 ---
+The quick brown fox jumps over the lazy [GREEN]dog[RESET].
+```
+
+### Markdown Format (--markdown)
+Displays a table comparing predictions:
+```
+| Position | Original | Option 1 | Option 2 |
+|----------|----------|----------|----------|
+| 1        | fox      | fox      | fox      |
+| 2        | jumps    | jumps    | leaps    |
+```
+
+## Configuration
+
+Key parameters to adjust:
+- `--n-masks`: Number of words to mask per text (default: 3)
+- `--num-infills`: Number of prediction candidates (default: 2)
+- `--max-chars`: Maximum characters per text before truncation (default: 500)
+- `--model-dir`: Path to trained ILM model directory
+- `--seed`: Random seed for reproducible masking
+
+## Requirements
+
+- torch
+- transformers (GPT2LMHeadModel)
+- Python 3.6+
+
+## Model Format
+
+The model directory should contain:
+- `pytorch_model.bin`: Pre-trained model weights
+- `config.json`: Model configuration
+- `additional_ids_to_tokens.pkl`: Pickle file mapping custom token IDs
 """
 
 import argparse
@@ -27,7 +141,28 @@ BOLD = '\033[1m'
 def colorize_infills_by_comparison(masked_text, generated_text):
     """
     Colorize infilled portions by comparing masked text with generated output.
-    Finds where ' _' was replaced and highlights those portions in green.
+
+    Compares the masked template (with ' _' markers) against the generated text
+    to identify which portions were newly infilled by the model. These portions
+    are highlighted in green to distinguish them from original context.
+
+    Args:
+        masked_text (str): Original text with blanks marked as ' _'
+        generated_text (str): Full text with infilled content from the model
+
+    Returns:
+        str: Generated text with infilled portions colored green, or original
+             text if pattern matching fails
+
+    Example:
+        >>> masked = "The quick _ fox jumps"
+        >>> generated = "The quick brown fox jumps"
+        >>> result = colorize_infills_by_comparison(masked, generated)
+        # Returns: "The quick [GREEN]brown[RESET] fox jumps"
+
+    Note:
+        Uses regex pattern matching with non-greedy matching to identify infills.
+        Falls back to returning text as-is if regex matching fails.
     """
     # Split masked text by the blank marker to get context pieces
     blank_marker = ' _'
@@ -75,7 +210,34 @@ def colorize_infills_by_comparison(masked_text, generated_text):
 
 
 def load_model_and_tokenizer(model_dir):
-    """Load the ILM model and tokenizer."""
+    """
+    Load the ILM model and tokenizer from disk.
+
+    Loads a GPT-2 based ILM model along with its custom tokenizer. The model
+    must include additional special tokens for infill control (e.g., '<|infill_word|>').
+
+    Args:
+        model_dir (str): Path to model directory containing:
+            - pytorch_model.bin: Model weights
+            - config.json: Model configuration
+            - additional_ids_to_tokens.pkl: Pickle file with token mappings
+
+    Returns:
+        tuple: (model, tokenizer, additional_tokens_to_ids, device)
+            - model (GPT2LMHeadModel): Loaded model in eval mode
+            - tokenizer: GPT-2 tokenizer
+            - additional_tokens_to_ids (dict): Mapping of token names to IDs
+            - device (torch.device): 'cuda' if available, else 'cpu'
+
+    Raises:
+        FileNotFoundError: If model files are not found
+        Exception: If tokenizer update fails (caught and ignored if already updated)
+
+    Example:
+        >>> model, tok, token_map, device = load_model_and_tokenizer('../models/sto_ilm')
+        >>> print(f"Model loaded on {device}")
+        Model loaded on cuda
+    """
     print("Loading tokenizer...")
     tokenizer = ilm.tokenize_util.Tokenizer.GPT2
 
@@ -101,7 +263,25 @@ def load_model_and_tokenizer(model_dir):
 
 
 def get_word_positions(text):
-    """Get positions of words in text (start, end, word)."""
+    """
+    Extract positions of all words in text.
+
+    Uses regex to find word boundaries and returns their character positions
+    along with the word content.
+
+    Args:
+        text (str): Input text to analyze
+
+    Returns:
+        list: List of tuples (start_pos, end_pos, word_text)
+            - start_pos (int): Character index where word starts
+            - end_pos (int): Character index where word ends (exclusive)
+            - word_text (str): The actual word
+
+    Example:
+        >>> get_word_positions("Hello world")
+        [(0, 5, 'Hello'), (6, 11, 'world')]
+    """
     positions = []
     for match in re.finditer(r'\b\w+\b', text):
         positions.append((match.start(), match.end(), match.group()))
@@ -110,8 +290,36 @@ def get_word_positions(text):
 
 def mask_random_words(text, n_masks=3, mask_type='word'):
     """
-    Randomly mask n words in the text.
-    Returns: (masked_text, mask_positions, mask_types)
+    Randomly mask n words in the text by replacing them with ' _' marker.
+
+    Selects n random words from the text and replaces them with ' _' (space
+    followed by underscore). This creates a template for the model to perform
+    infilling. Also tracks the original positions and words for later comparison.
+
+    Args:
+        text (str): Input text to mask
+        n_masks (int): Number of words to mask (default: 3)
+        mask_type (str): Type of mask ('word', 'sentence', 'ngram') - used for
+                        infill token selection (default: 'word')
+
+    Returns:
+        tuple: (masked_text, mask_positions, mask_types)
+            - masked_text (str): Text with randomly selected words replaced by ' _'
+            - mask_positions (list): List of (position, original_word) tuples
+            - mask_types (list): List of mask types for each masked word
+
+    Example:
+        >>> text = "The quick brown fox jumps"
+        >>> masked, positions, types = mask_random_words(text, n_masks=2)
+        >>> print(masked)
+        "The _ brown _ jumps"
+        >>> print(positions)
+        [(4, 'quick'), (14, 'fox')]
+
+    Note:
+        - If n_masks > number of words in text, masks all available words
+        - Adjusts positions for text modifications as masks are applied
+        - Returns empty lists if text has no words
     """
     word_positions = get_word_positions(text)
 
@@ -147,7 +355,43 @@ def mask_random_words(text, n_masks=3, mask_type='word'):
 
 
 def infill_text(model, tokenizer, additional_tokens_to_ids, text, mask_types, num_infills=2):
-    """Infill the masked text."""
+    """
+    Generate multiple infill predictions for masked text.
+
+    Takes a template with ' _' markers and generates multiple candidate infills
+    using the trained ILM model. The mask_types parameter controls which infill
+    token is used for each blank.
+
+    Args:
+        model (GPT2LMHeadModel): Trained ILM model
+        tokenizer: GPT-2 tokenizer with custom tokens
+        additional_tokens_to_ids (dict): Mapping of token names to IDs
+        text (str): Masked text template with ' _' markers
+        mask_types (list): List of mask types ('word', 'sentence', 'ngram') for each blank
+        num_infills (int): Number of prediction candidates to generate (default: 2)
+
+    Returns:
+        list: List of num_infills decoded text strings with infilled content,
+              with infilled portions highlighted in green
+
+    Example:
+        >>> masked_text = "The _ brown fox"
+        >>> results = infill_text(model, tok, token_map, masked_text, ['word'], num_infills=3)
+        >>> for i, result in enumerate(results, 1):
+        ...     print(f"Option {i}: {result}")
+        Option 1: The [GREEN]quick[RESET] brown fox
+        Option 2: The [GREEN]big[RESET] brown fox
+        Option 3: The [GREEN]fat[RESET] brown fox
+
+    Raises:
+        ValueError: If blank token not found in tokenized text
+        Exception: Propagates any errors from the underlying infill_with_ilm function
+
+    Note:
+        - Replaces blanks with appropriate infill tokens based on mask_types
+        - Colorizes infilled portions green for visual distinction
+        - Handles edge cases like missing blanks gracefully
+    """
     original_masked_text = text  # Keep for colorization
 
     # Tokenize
@@ -191,8 +435,32 @@ def infill_text(model, tokenizer, additional_tokens_to_ids, text, mask_types, nu
 
 def extract_infilled_words(original_text, result_text, mask_positions):
     """
-    Extract the infilled words from a result by comparing with original.
-    Returns list of infilled words in order of mask positions.
+    Extract infilled words by comparing original and result texts.
+
+    Identifies which words replaced the masked positions by comparing the
+    original text word positions with those in the result. Useful for
+    structured output like markdown tables.
+
+    Args:
+        original_text (str): Original text with ' _' markers for blanks
+        result_text (str): Full text with infilled content (ANSI codes removed)
+        mask_positions (list): List of (position, original_word) tuples from masking
+
+    Returns:
+        list: List of infilled words in order of mask positions, or '?' if extraction fails
+
+    Example:
+        >>> original = "The _ brown _ jumps"
+        >>> result = "The quick brown fox jumps"
+        >>> positions = [(4, 'quick'), (14, 'fox')]
+        >>> extract_infilled_words(original, result, positions)
+        ['quick', 'fox']
+
+    Note:
+        - Parses both texts into word tokens using regex word boundary matching
+        - Maps original mask positions to word indices
+        - Returns '?' for any positions that fail to extract
+        - Useful for creating structured output (markdown tables)
     """
     if not mask_positions or not result_text:
         return []
@@ -233,7 +501,36 @@ def extract_infilled_words(original_text, result_text, mask_positions):
 
 
 def format_markdown_table(masked_words, results, num_infills):
-    """Format predictions as a markdown table."""
+    """
+    Format prediction results as a markdown table.
+
+    Creates a structured table showing original masked words and their predicted
+    replacements from each infill option, with predictions highlighted in green.
+
+    Args:
+        masked_words (list): List of original words that were masked
+        results (list): List of lists containing extracted infilled words
+                       results[i] is a list of infilled words for option i
+        num_infills (int): Number of infill options (used for context)
+
+    Returns:
+        str: Markdown formatted table string ready for printing or saving
+
+    Example:
+        >>> masked_words = ['quick', 'fox']
+        >>> results = [['speedy', 'dog'], ['fast', 'hound']]
+        >>> table = format_markdown_table(masked_words, results, 2)
+        >>> print(table)
+        | Position | Original | Option 1 | Option 2 |
+        |----------|----------|----------|----------|
+        | 1        | quick    | speedy   | fast     |
+        | 2        | fox      | dog      | hound    |
+
+    Note:
+        - Predictions are colored green with ANSI codes
+        - Gracefully handles missing predictions with '?'
+        - Header includes Position, Original, and Option N columns
+    """
     # Header
     headers = ['Position', 'Original'] + [f'Option {i+1}' for i in range(len(results))]
     header_line = '| ' + ' | '.join(headers) + ' |'
@@ -257,7 +554,36 @@ def format_markdown_table(masked_words, results, num_infills):
 
 
 def truncate_text(text, max_chars=500):
-    """Truncate text to max_chars, trying to end at a sentence boundary."""
+    """
+    Truncate text intelligently at sentence or word boundaries.
+
+    Attempts to truncate text at a natural boundary (sentence end) to maintain
+    readability. Falls back to word boundaries if no sentence end is found,
+    or to character boundary with ellipsis as last resort.
+
+    Args:
+        text (str): Text to truncate
+        max_chars (int): Maximum character limit (default: 500)
+
+    Returns:
+        str: Truncated text (unchanged if already under max_chars), with "..."
+             appended if truncation occurred
+
+    Example:
+        >>> long_text = "First sentence. Second sentence. Third sentence."
+        >>> truncate_text(long_text, max_chars=20)
+        "First sentence."
+
+    Priority order:
+        1. Sentence boundary (., ?, !) in second half of max_chars
+        2. Word boundary (space) near max_chars
+        3. Character boundary with ellipsis
+
+    Note:
+        - Returns text unchanged if already under max_chars
+        - Requires sentence boundary to be at least halfway through max_chars
+        - Useful for preventing extremely long texts in interactive mode
+    """
     if len(text) <= max_chars:
         return text
 
@@ -281,14 +607,84 @@ def truncate_text(text, max_chars=500):
 
 
 def get_default_model_dir():
-    """Get default model directory based on project structure."""
+    """
+    Get default model directory based on project structure.
+
+    Assumes a standard project layout where the model is located at
+    `../models/sto_ilm` relative to the script location.
+
+    Returns:
+        str: Path to default model directory
+
+    Example:
+        >>> model_dir = get_default_model_dir()
+        >>> print(model_dir)
+        /home/user/project/models/sto_ilm
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
     return os.path.join(project_root, 'models', 'sto_ilm')
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Interactive ILM Inference')
+    """
+    Main entry point for the interactive ILM inference script.
+
+    Parses command-line arguments, loads the model and data, and runs the
+    interactive loop allowing users to navigate through texts and view
+    predictions.
+
+    Command-line Arguments:
+        -i, --input (str, required): Path to input CSV file
+        --n-masks (int): Number of tokens to mask (default: 3)
+        --num-infills (int): Number of infill predictions (default: 2)
+        --model-dir (str): Path to model directory (default: ../models/sto_ilm)
+        --max-chars (int): Max characters per text (default: 500)
+        --start-idx (int): Starting index in CSV (default: 0)
+        --shuffle: Shuffle texts randomly (flag)
+        --seed (int): Random seed for reproducibility
+        --markdown, -md: Output as markdown table (flag)
+
+    Interactive Controls:
+        - [Enter]: Move to next text
+        - 'r': Re-mask current text with new random selection
+        - 'q': Quit script
+        - [number]: Jump to specific text index (1-indexed)
+
+    Workflow:
+        1. Parse arguments and set random seed if provided
+        2. Load model, tokenizer, and additional tokens
+        3. Load texts from CSV
+        4. Optionally shuffle texts
+        5. Enter interactive loop:
+           - Display text information (ID, CEFR, L1)
+           - Show original text
+           - Show masked version
+           - Generate and display predictions
+           - Wait for user input to continue
+
+    Raises:
+        FileNotFoundError: If input CSV or model files not found
+        KeyboardInterrupt: Gracefully handles Ctrl+C exit
+    """
+    parser = argparse.ArgumentParser(
+        description='Interactive ILM Inference',
+        epilog="""
+Examples:
+  # Basic usage
+  python ilm_interactive.py -i texts.csv
+
+  # Generate 5 predictions, mask 4 words, shuffle texts
+  python ilm_interactive.py -i texts.csv --n-masks 4 --num-infills 5 --shuffle
+
+  # Start from text 10, use markdown output, set seed for reproducibility
+  python ilm_interactive.py -i texts.csv --start-idx 9 --markdown --seed 42
+
+  # Limit text length, use custom model directory
+  python ilm_interactive.py -i texts.csv --max-chars 300 --model-dir /path/to/model
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument('-i', '--input', type=str, required=True,
                         help='Path to input CSV file (required)')
     parser.add_argument('--n-masks', type=int, default=3,

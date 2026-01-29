@@ -179,6 +179,11 @@ class BaseInfillingModel(ABC):
         """Return model type identifier."""
         pass
 
+    @abstractmethod
+    def count_subtokens(self, word: str) -> int:
+        """Count how many subtokens this word is tokenized into by this model's tokenizer."""
+        pass
+
 
 # =============================================================================
 # ILM Model Wrapper
@@ -258,6 +263,16 @@ class ILMModelWrapper(BaseInfillingModel):
         result.append(text[prev_end:])
         return ''.join(result)
 
+    def count_subtokens(self, word: str) -> int:
+        """Count how many subtokens this word is tokenized into by ILM's GPT2 tokenizer."""
+        if not word or not word.strip():
+            return 1
+        try:
+            subtokens = ilm.tokenize_util.tokenize(word, self.tokenizer)
+            return len(subtokens)
+        except Exception:
+            return 1
+
 
 # =============================================================================
 # MLM Model Wrapper (BERT, RoBERTa, etc.)
@@ -309,6 +324,16 @@ class MLMModelWrapper(BaseInfillingModel):
 
         except Exception:
             return None
+
+    def count_subtokens(self, word: str) -> int:
+        """Count how many subtokens this word is tokenized into by the MLM tokenizer."""
+        if not word or not word.strip():
+            return 1
+        try:
+            tokens = self.tokenizer.tokenize(word)
+            return len(tokens)
+        except Exception:
+            return 1
 
 
 # =============================================================================
@@ -423,6 +448,16 @@ class T5ModelWrapper(BaseInfillingModel):
         if getattr(self.tokenizer, 'bos_token', None):
             output = output.replace(self.tokenizer.bos_token, "")
         return output.strip()
+
+    def count_subtokens(self, word: str) -> int:
+        """Count how many subtokens this word is tokenized into by the T5 tokenizer."""
+        if not word or not word.strip():
+            return 1
+        try:
+            tokens = self.tokenizer.tokenize(word)
+            return len(tokens)
+        except Exception:
+            return 1
 
 
 # =============================================================================
@@ -593,6 +628,10 @@ class MetricsAccumulator:
         # Structure: {pos_tag: {model_name: {metric: [values]}}}
         self.by_pos = {}
         self.pos_tags_seen = set()
+        # Subtoken count breakdown - dynamically populated per model
+        # Structure: {model_name: {subtoken_count: {metric: [values]}}}
+        self.by_n_llm_subtokens = {}
+        self.n_llm_subtokens_seen = set()
 
     def _empty_metrics(self) -> Dict[str, List[float]]:
         return {
@@ -605,7 +644,7 @@ class MetricsAccumulator:
             'bigram_f1': [],
         }
 
-    def add(self, model_name: str, pred: str, orig: str, cefr: str, pos: str = 'UNK'):
+    def add(self, model_name: str, pred: str, orig: str, cefr: str, pos: str = 'UNK', n_llm_subtokens: Optional[int] = None):
         """Add a single prediction result."""
         # Calculate metrics
         acc = calc_accuracy(pred, orig)
@@ -640,6 +679,20 @@ class MetricsAccumulator:
             for metric, value in metrics.items():
                 self.by_pos[pos][model_name][metric].append(value)
 
+        # Add to subtoken count-specific (per-model breakdown)
+        if n_llm_subtokens is not None:
+            # Initialize per-model storage if needed
+            if model_name not in self.by_n_llm_subtokens:
+                self.by_n_llm_subtokens[model_name] = {}
+            # Create bucket for this subtoken count if needed
+            n_str = str(n_llm_subtokens)
+            if n_str not in self.by_n_llm_subtokens[model_name]:
+                self.by_n_llm_subtokens[model_name][n_str] = self._empty_metrics()
+                self.n_llm_subtokens_seen.add(n_llm_subtokens)
+            # Append metrics
+            for metric, value in metrics.items():
+                self.by_n_llm_subtokens[model_name][n_str][metric].append(value)
+
     def get_summary(self, metrics_dict: Dict[str, Dict[str, List[float]]]) -> Dict[str, Dict[str, float]]:
         """Compute summary statistics from accumulated values."""
         summary = {}
@@ -667,13 +720,76 @@ class MetricsAccumulator:
         """Get per-PoS metrics summary."""
         return {pos: self.get_summary(metrics) for pos, metrics in self.by_pos.items()}
 
-    def get_full_results(self) -> Dict[str, Any]:
-        """Get complete results dictionary."""
-        return {
+    def _bucket_subtoken_count(self, n: int) -> str:
+        """Bucket a subtoken count into ranges: '1', '2', '3-4', '5+'."""
+        if n == 1:
+            return '1'
+        elif n == 2:
+            return '2'
+        elif n in (3, 4):
+            return '3-4'
+        else:  # n >= 5
+            return '5+'
+
+    def _get_bucketed_subtoken_breakdown(self) -> Dict[str, Dict[str, Dict[str, List[float]]]]:
+        """Convert exact subtoken counts to bucketed breakdown."""
+        bucketed = {}
+        for model_name, subtoken_dict in self.by_n_llm_subtokens.items():
+            bucketed[model_name] = {}
+            for n_str, metrics in subtoken_dict.items():
+                n = int(n_str)
+                bucket = self._bucket_subtoken_count(n)
+                if bucket not in bucketed[model_name]:
+                    bucketed[model_name][bucket] = self._empty_metrics()
+                # Append all metric values to the bucket
+                for metric, values in metrics.items():
+                    bucketed[model_name][bucket][metric].extend(values)
+        return bucketed
+
+    def get_n_llm_subtokens_summary(self, bucketed: bool = False) -> Dict[str, Dict[str, Dict[str, float]]]:
+        """Get per-subtoken-count metrics summary.
+
+        Args:
+            bucketed: If True, use bucketed ranges (1, 2, 3-4, 5+). If False, use exact counts.
+
+        Returns:
+            Structure: {model_name: {subtoken_count/bucket: {metric: value}}}
+        """
+        if bucketed:
+            bucketed_breakdown = self._get_bucketed_subtoken_breakdown()
+            result = {}
+            for model_name, bucket_dict in bucketed_breakdown.items():
+                result[model_name] = self.get_summary(bucket_dict)
+            return result
+        else:
+            # Exact counts: return summary for each model's subtoken breakdown
+            result = {}
+            for model_name, subtoken_dict in self.by_n_llm_subtokens.items():
+                result[model_name] = self.get_summary(subtoken_dict)
+            return result
+
+    def get_full_results(self, subtoken_granularity: str = 'exact') -> Dict[str, Any]:
+        """Get complete results dictionary.
+
+        Args:
+            subtoken_granularity: 'exact', 'bucketed', or 'both'
+
+        Returns:
+            Dictionary with 'overall', 'by_cefr', 'by_pos', and optionally 'by_n_llm_subtokens'
+        """
+        results = {
             'overall': self.get_overall_summary(),
             'by_cefr': self.get_cefr_summary(),
             'by_pos': self.get_pos_summary(),
         }
+
+        if subtoken_granularity in ('exact', 'both'):
+            results['by_n_llm_subtokens'] = self.get_n_llm_subtokens_summary(bucketed=False)
+
+        if subtoken_granularity in ('bucketed', 'both'):
+            results['by_n_llm_subtokens_bucketed'] = self.get_n_llm_subtokens_summary(bucketed=True)
+
+        return results
 
     def print_progress(self, n_processed: int, n_total: int):
         """Print current progress metrics."""
@@ -725,6 +841,7 @@ def build_config(args, model_specs: List[str], model_labels: List[str],
             'print_every': args.print_every,
             'quiet': args.quiet,
             'masking': args.masking,
+            'subtoken_granularity': args.subtoken_granularity,
         },
 
         # Models
@@ -792,6 +909,9 @@ Examples:
                         help='Masking strategy: human-tokens (NLTK with PoS) or regex-tokens (default: human-tokens)')
     parser.add_argument('--samples-per-text', type=int, default=1,
                         help='Number of random mask samples per text (default: 1)')
+    parser.add_argument('--subtoken-granularity', type=str, default='exact',
+                        choices=['exact', 'bucketed', 'both'],
+                        help='Subtoken count granularity: exact (individual counts), bucketed (ranges 1,2,3-4,5+), or both (default: exact)')
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -925,10 +1045,12 @@ Examples:
                     if result:
                         predicted_words = extract_infilled_words(text, result, mask_positions)
 
-                        # Add each prediction to accumulator (with PoS tag)
+                        # Add each prediction to accumulator (with PoS tag and subtoken count)
                         for pred, orig, pos in zip(predicted_words, original_words, pos_tags):
                             if pred:  # Skip empty predictions
-                                accumulator.add(label, pred, orig, cefr, pos)
+                                # Count subtokens using this model's tokenizer
+                                n_subtokens = model.count_subtokens(orig)
+                                accumulator.add(label, pred, orig, cefr, pos, n_llm_subtokens=n_subtokens)
                 except Exception:
                     pass  # Skip failed predictions
 
@@ -937,7 +1059,7 @@ Examples:
             accumulator.print_progress(idx + 1, len(texts))
             # Save partial results if output file specified
             if args.output:
-                partial_results = accumulator.get_full_results()
+                partial_results = accumulator.get_full_results(subtoken_granularity=args.subtoken_granularity)
                 partial_results['config'] = build_config(
                     args=args,
                     model_specs=model_specs,
@@ -952,7 +1074,7 @@ Examples:
                     json.dump(partial_results, f, indent=2, ensure_ascii=False)
 
     # Final results
-    results = accumulator.get_full_results()
+    results = accumulator.get_full_results(subtoken_granularity=args.subtoken_granularity)
     results['config'] = build_config(
         args=args,
         model_specs=model_specs,
