@@ -1,4 +1,5 @@
-# Models and weights
+# Data and Models
+data/
 models/
 *.pkl
 *.pt
